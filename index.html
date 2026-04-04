@@ -518,20 +518,34 @@ function renderList(){
   attachHandlers();
 }
 
-// ── Auto-save: debounce 1.5s, no re-render ──
-function autoSave(id){
-  clearTimeout(autoSaveTimers[id]);
+// ── Auto-save ──
+// For text fields (notes, deadline): save only when user leaves the field (blur)
+// For select (status) and assignees: save immediately since they're single actions
+// The btn indicator shows "unsaved changes" while a field is dirty, saves on blur
+
+const dirtyFields = {}; // tracks which task ids have unsaved text changes
+
+function markDirty(id){
+  dirtyFields[id] = true;
   const btn = document.querySelector(`[data-save="${id}"]`);
-  if(btn){ btn.textContent = "Saving…"; btn.disabled = true; }
+  if(btn && !btn.disabled){ btn.innerHTML = "Unsaved changes"; btn.style.opacity="0.7"; }
+}
+
+function autoSave(id, immediate){
+  clearTimeout(autoSaveTimers[id]);
+  const delay = immediate ? 0 : 0; // always flush now — blur already waited
   autoSaveTimers[id] = setTimeout(async () => {
+    dirtyFields[id] = false;
+    const btn = document.querySelector(`[data-save="${id}"]`);
+    if(btn){ btn.textContent = "Saving…"; btn.disabled = true; btn.style.opacity="1"; }
     const ok = await save(id);
-    if(btn){ btn.innerHTML = "Saved &amp; synced"; btn.disabled = false; }
+    if(btn){ btn.innerHTML = "Saved &amp; synced"; btn.disabled = false; btn.style.opacity="1"; }
     if(ok){
       const msg = document.getElementById("sm-"+id);
       if(msg){ msg.style.opacity="1"; setTimeout(()=>{ msg.style.opacity="0"; },2000); }
       renderStats();
     }
-  }, 1500);
+  }, 0);
 }
 
 function attachHandlers(){
@@ -540,7 +554,6 @@ function attachHandlers(){
       if(e.target.closest("[data-m]")||e.target.closest("[data-save]")) return;
       const id = +el.dataset.id;
       expanded[id] = !expanded[id];
-      // just toggle classes, no re-render
       const body = el.nextElementSibling;
       const chev = el.querySelector(".chev");
       if(body) body.classList.toggle("open", expanded[id]);
@@ -560,35 +573,54 @@ function attachHandlers(){
       av.style.background = sel ? "rgba(62,207,142,.2)" : "";
       av.style.color = sel ? "#3ecf8e" : "";
       patchCardHead(id);
-      autoSave(id);
+      autoSave(id, true); // instant — single discrete action
     });
   });
   document.querySelectorAll("[data-field]").forEach(el => {
-    el.addEventListener("change", () => {
-      const id = +el.dataset.id;
-      state[id][el.dataset.field] = el.value;
-      if(el.dataset.field==="status"){
-        patchCardHead(id);
-        renderStats();
-        // if filtering by status, card may need to disappear — do a quiet re-render
-        if(filter !== "all") renderList();
-      }
-      autoSave(id);
-    });
-    el.addEventListener("input", () => {
-      state[+el.dataset.id][el.dataset.field] = el.value;
-      if(el.dataset.field==="deadline") patchCardHead(+el.dataset.id);
-      autoSave(+el.dataset.id);
-    });
+    const isText = el.tagName === "TEXTAREA" || (el.tagName === "INPUT" && el.type === "text");
+
+    if(isText){
+      // While typing: just update state and mark dirty, never trigger save
+      el.addEventListener("input", () => {
+        const id = +el.dataset.id;
+        state[id][el.dataset.field] = el.value;
+        if(el.dataset.field === "deadline") patchCardHead(id);
+        markDirty(id);
+      });
+      // On blur (leaving the field): now save
+      el.addEventListener("blur", () => {
+        const id = +el.dataset.id;
+        state[id][el.dataset.field] = el.value;
+        if(dirtyFields[id]) autoSave(id, true);
+      });
+    } else {
+      // Selects (status): save immediately on change
+      el.addEventListener("change", () => {
+        const id = +el.dataset.id;
+        state[id][el.dataset.field] = el.value;
+        if(el.dataset.field === "status"){
+          patchCardHead(id);
+          renderStats();
+          if(filter !== "all") renderList();
+        }
+        autoSave(id, true);
+      });
+    }
   });
   document.querySelectorAll("[data-save]").forEach(btn => {
     btn.addEventListener("click", async e => {
       e.stopPropagation();
       const id = +btn.dataset.save;
       clearTimeout(autoSaveTimers[id]);
-      btn.disabled = true; btn.textContent = "Saving…";
+      dirtyFields[id] = false;
+      // capture any text that's currently focused in this card
+      const active = document.activeElement;
+      if(active && active.dataset && +active.dataset.id === id){
+        state[id][active.dataset.field] = active.value;
+      }
+      btn.disabled = true; btn.textContent = "Saving…"; btn.style.opacity="1";
       const ok = await save(id);
-      btn.disabled = false; btn.innerHTML = "Saved &amp; synced";
+      btn.disabled = false; btn.innerHTML = "Saved &amp; synced"; btn.style.opacity="1";
       if(ok){
         const msg = document.getElementById("sm-"+id);
         if(msg){ msg.style.opacity="1"; setTimeout(()=>{ msg.style.opacity="0"; },2000); }
