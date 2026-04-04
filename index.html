@@ -354,7 +354,14 @@ function setLastSync(){
     "synced " + t.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});
 }
 
-// ── Load from Supabase ──
+// ── Returns task id being actively typed in ──
+function focusedTaskId(){
+  const el = document.activeElement;
+  if(!el || !el.dataset) return null;
+  return el.dataset.id ? +el.dataset.id : null;
+}
+
+// ── Initial full load — called once on startup ──
 async function load(){
   badge("saving","loading…");
   try {
@@ -375,6 +382,64 @@ async function load(){
     setLastSync();
     badge("live","live");
     renderStats(); renderList();
+  } catch(e){
+    badge("error","offline");
+  }
+}
+
+// ── Background poll — surgically patches only changed cards, never interrupts typing ──
+async function backgroundPoll(){
+  try {
+    const rows = await dbGetAll();
+    const activeId = focusedTaskId();
+    let statsChanged = false;
+
+    rows.forEach(row => {
+      const id = row.id;
+      // Never touch a card the user is actively editing or has pending unsaved changes
+      if(id === activeId || dirtyFields[id] || autoSaveTimers[id]) return;
+
+      const incoming = {
+        status:    row.status    || "not started",
+        assignees: row.assignees ? row.assignees.split(",").map(s=>s.trim()).filter(Boolean) : [],
+        deadline:  row.deadline  || "",
+        notes:     row.notes     || "",
+      };
+      const cur = state[id];
+      const changed =
+        cur.status    !== incoming.status ||
+        cur.deadline  !== incoming.deadline ||
+        cur.notes     !== incoming.notes ||
+        JSON.stringify(cur.assignees) !== JSON.stringify(incoming.assignees);
+
+      if(!changed) return;
+      state[id] = incoming;
+      statsChanged = true;
+
+      // Patch the card header chips silently
+      patchCardHead(id);
+
+      // If this card is expanded, update its form fields in place too
+      const body = document.querySelector(`[data-card="${id}"] .task-body`);
+      if(body && body.classList.contains("open")){
+        const sel = body.querySelector(`select[data-field="status"]`);
+        if(sel) sel.value = incoming.status;
+        const dl = body.querySelector(`input[data-field="deadline"]`);
+        if(dl) dl.value = incoming.deadline;
+        const notesEl = body.querySelector(`textarea[data-field="notes"]`);
+        if(notesEl) notesEl.value = incoming.notes;
+        body.querySelectorAll(".amember").forEach(btn => {
+          const on = incoming.assignees.includes(btn.dataset.m);
+          btn.classList.toggle("sel", on);
+          const av = btn.querySelector(".av");
+          if(av){ av.style.background = on ? "rgba(62,207,142,.2)" : ""; av.style.color = on ? "#3ecf8e" : ""; }
+        });
+      }
+    });
+
+    if(statsChanged) renderStats();
+    setLastSync();
+    badge("live","live");
   } catch(e){
     badge("error","offline");
   }
@@ -645,7 +710,7 @@ TASKS.forEach(t => { state[t.id] = {status:"not started",assignees:[],deadline:"
 (async()=>{
   await load();
   document.getElementById("loading").style.display = "none";
-  pollTimer = setInterval(load, 20000);
+  pollTimer = setInterval(backgroundPoll, 20000);
 })();
 </script>
 </body>
