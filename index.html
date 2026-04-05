@@ -684,13 +684,10 @@ function renderGantt(){
   sorted.forEach(({t,s,d})=>{
     const col = COLORS[s.status]||COLORS["not started"];
     const short = t.title.length>17 ? t.title.slice(0,15)+"…" : t.title;
-    const assignee = s.assignees.length ? s.assignees[0].split(" ")[0] : "";
 
     html+=`<div style="display:flex;align-items:center;height:${ROW_H}px">`;
-    // Label
     html+=`<div style="width:${LABEL_W}px;flex-shrink:0;padding-right:10px;text-align:right">`;
-    html+=`<div style="font-size:11px;font-weight:500;color:var(--t1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${short}</div>`;
-    if(assignee) html+=`<div style="font-size:10px;color:var(--t3);margin-top:1px">${assignee}</div>`;
+    html+=`<div style="font-size:11px;font-weight:500;color:var(--t2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${short}</div>`;
     html+=`</div>`;
 
     // Track
@@ -719,9 +716,11 @@ function renderGantt(){
       const barEnd   = toPct(d);
       const barW     = Math.max(0.8, barEnd-barStart);
 
-      // Bar
-      html+=`<div style="position:absolute;top:6px;height:20px;left:${barStart}%;width:${barW}%;background:${col.bar};border:1px solid ${col.border};border-radius:4px;display:flex;align-items:center;padding:0 7px;overflow:hidden">`;
-      html+=`<span style="font-size:10px;font-weight:500;color:${col.text};white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${short}</span>`;
+      // Bar — name + assignees inside the bar
+      const assigneeStr = s.assignees.length ? " · "+s.assignees.map(a=>a.split(" ")[0]).join(", ") : "";
+      html+=`<div style="position:absolute;top:6px;height:20px;left:${barStart}%;width:${barW}%;background:${col.bar};border:1px solid ${col.border};border-radius:4px;display:flex;align-items:center;gap:5px;padding:0 8px;overflow:hidden;min-width:6px">`;
+      html+=`<div style="width:6px;height:6px;border-radius:50%;background:${col.border};flex-shrink:0"></div>`;
+      html+=`<span style="font-size:10px;font-weight:500;color:${col.text};white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${assigneeStr ? assigneeStr.replace(" · ","") : "unassigned"}</span>`;
       html+=`</div>`;
 
       // Deadline marker (vertical line + dot)
@@ -808,7 +807,7 @@ function autoSave(id, immediate){
     if(ok){
       const msg = document.getElementById("sm-"+id);
       if(msg){ msg.style.opacity="1"; setTimeout(()=>{ msg.style.opacity="0"; },2000); }
-      renderStats();
+      renderStats(); renderGantt();
     }
   }, 0);
 }
@@ -845,6 +844,16 @@ function attachHandlers(){
     const isText = el.tagName === "TEXTAREA" || (el.tagName === "INPUT" && el.type === "text");
 
     if(isText){
+      // Auto-resize textarea to fit content
+      if(el.tagName === "TEXTAREA"){
+        const autoResize = () => {
+          el.style.height = "auto";
+          el.style.height = (el.scrollHeight) + "px";
+        };
+        el.addEventListener("input", autoResize);
+        // Run once on attach to size existing content
+        setTimeout(autoResize, 0);
+      }
       // While typing: just update state and mark dirty, never trigger save
       el.addEventListener("input", () => {
         const id = +el.dataset.id;
