@@ -295,6 +295,12 @@ main { max-width: 820px; margin: 0 auto; padding: 32px 20px 80px; }
     <button class="fbtn" data-f="complete">Complete</button>
   </div>
   <div class="task-list" id="task-list"></div>
+
+  <div class="section-toggle" id="tl-toggle">
+    <h2>Deadline timeline</h2>
+    <span class="section-caret open" id="tl-caret">&#9660;</span>
+  </div>
+  <div class="timeline" id="timeline"></div>
 </main>
 
 <script>
@@ -391,7 +397,7 @@ async function load(){
     });
     setLastSync();
     badge("live","live");
-    renderStats(); renderList();
+    renderStats(); renderList(); renderTimeline();
   } catch(e){
     badge("error","offline");
   }
@@ -573,7 +579,7 @@ function patchCardHead(id){
 function renderStats(){
   const c = {}; STATUSES.forEach(s=>c[s]=0);
   TASKS.forEach(t => c[state[t.id].status]++);
-  const done = c["done"];
+  const done = c["complete"] || 0;
   const pct = Math.round(done/TASKS.length*100);
   document.getElementById("pfill").style.width = pct+"%";
   document.getElementById("pct").textContent = pct+"%";
@@ -582,6 +588,116 @@ function renderStats(){
   document.getElementById("stats").innerHTML = STATUSES.map(s =>
     `<div class="stat ${cls[s]}"><div class="stat-n">${c[s]}</div><div class="stat-l">${lbl[s]}</div></div>`
   ).join("");
+}
+
+// ── Timeline ──
+function renderTimeline(){
+  const el = document.getElementById("timeline");
+  const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  const today = new Date(); today.setHours(0,0,0,0);
+
+  // Parse deadline strings into dates — handles "Apr 15", "April 15", "4/15", "4/15/2026"
+  function parseDeadline(str){
+    if(!str || !str.trim()) return null;
+    str = str.trim();
+    // Try "Apr 15" or "April 15" style
+    const monthName = /^([A-Za-z]+)\s+(\d{1,2})(?:[,\s]+(\d{4}))?$/.exec(str);
+    if(monthName){
+      const mIdx = MONTHS.findIndex(m => monthName[1].toLowerCase().startsWith(m.toLowerCase()));
+      if(mIdx >= 0){
+        const yr = monthName[3] ? +monthName[3] : (new Date()).getFullYear();
+        return new Date(yr, mIdx, +monthName[2]);
+      }
+    }
+    // Try slash format
+    const slash = /^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?$/.exec(str);
+    if(slash){
+      const yr = slash[3] ? (+slash[3] < 100 ? 2000 + +slash[3] : +slash[3]) : (new Date()).getFullYear();
+      return new Date(yr, +slash[1]-1, +slash[2]);
+    }
+    // Try native parse as last resort
+    const d = new Date(str);
+    return isNaN(d) ? null : d;
+  }
+
+  function daysDiff(d){ return Math.round((d - today) / 86400000); }
+
+  function urgency(d, status){
+    if(status === "complete") return "done-item";
+    const diff = daysDiff(d);
+    if(diff < 0) return "overdue";
+    if(diff <= 5) return "soon";
+    return "ok";
+  }
+
+  // Build list: tasks with deadlines first (sorted), then without
+  const withDL = [], withoutDL = [];
+  TASKS.forEach(t => {
+    const s = state[t.id];
+    const d = parseDeadline(s.deadline);
+    if(d) withDL.push({t, s, d});
+    else withoutDL.push({t, s});
+  });
+  withDL.sort((a,b) => a.d - b.d);
+
+  if(!withDL.length && !withoutDL.length){ el.innerHTML = `<div class="tl-empty">no tasks yet</div>`; return; }
+
+  const rows = [];
+
+  withDL.forEach(({t, s, d}) => {
+    const urg = urgency(d, s.status);
+    const diff = daysDiff(d);
+    let rel = "";
+    if(s.status === "complete") rel = "complete";
+    else if(diff < 0) rel = `${Math.abs(diff)}d overdue`;
+    else if(diff === 0) rel = "today";
+    else if(diff === 1) rel = "tomorrow";
+    else rel = `in ${diff}d`;
+    const m = SM[s.status];
+    const assigneeStr = s.assignees.length ? s.assignees.map(a=>a.split(" ")[0]).join(", ") : "unassigned";
+    rows.push(`<div class="tl-item tl-${urg} ${urg==="done-item"?"tl-done-item":""}">
+      <div class="tl-date-col">
+        <div class="tl-day">${d.getDate()}</div>
+        <div class="tl-month">${MONTHS[d.getMonth()]}</div>
+        <div class="tl-relative">${rel}</div>
+      </div>
+      <div class="tl-content">
+        <div class="tl-dot" style="background:${m.dot}"></div>
+        <div class="tl-info">
+          <div class="tl-title">${t.title}</div>
+          <div class="tl-assignees">${assigneeStr}</div>
+        </div>
+        <div class="tl-chips">
+          <span class="chip ${m.cls}">${m.label}</span>
+        </div>
+      </div>
+    </div>`);
+  });
+
+  // Tasks without deadlines
+  withoutDL.forEach(({t, s}) => {
+    const m = SM[s.status];
+    const assigneeStr = s.assignees.length ? s.assignees.map(a=>a.split(" ")[0]).join(", ") : "unassigned";
+    rows.push(`<div class="tl-item tl-nodl" style="opacity:.5">
+      <div class="tl-date-col">
+        <div class="tl-day" style="font-size:14px;color:var(--t3)">—</div>
+        <div class="tl-month">no date</div>
+        <div class="tl-relative" style="color:var(--t3)">unscheduled</div>
+      </div>
+      <div class="tl-content">
+        <div class="tl-dot" style="background:${m.dot}"></div>
+        <div class="tl-info">
+          <div class="tl-title">${t.title}</div>
+          <div class="tl-assignees">${assigneeStr}</div>
+        </div>
+        <div class="tl-chips">
+          <span class="chip ${m.cls}">${m.label}</span>
+        </div>
+      </div>
+    </div>`);
+  });
+
+  el.innerHTML = rows.join("");
 }
 
 // ── Full list render — only called on first load ──
@@ -714,7 +830,7 @@ function attachHandlers(){
       if(ok){
         const msg = document.getElementById("sm-"+id);
         if(msg){ msg.style.opacity="1"; setTimeout(()=>{ msg.style.opacity="0"; },2000); }
-        renderStats();
+        renderStats(); renderTimeline();
       }
     });
   });
@@ -727,6 +843,15 @@ document.querySelectorAll(".fbtn").forEach(b => {
     b.classList.add("on");
     applyFilter();
   });
+});
+
+// ── Timeline toggle ──
+document.getElementById("tl-toggle").addEventListener("click", () => {
+  const el = document.getElementById("timeline");
+  const caret = document.getElementById("tl-caret");
+  const hidden = el.style.display === "none";
+  el.style.display = hidden ? "" : "none";
+  caret.classList.toggle("open", hidden);
 });
 
 // ── Init ──
