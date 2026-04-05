@@ -294,13 +294,21 @@ main { max-width: 820px; margin: 0 auto; padding: 32px 20px 80px; }
     <button class="fbtn" data-f="published">Published</button>
     <button class="fbtn" data-f="complete">Complete</button>
   </div>
-  <div class="task-list" id="task-list"></div>
-
-  <div class="section-toggle" id="tl-toggle">
-    <h2>Deadline timeline</h2>
-    <span class="section-caret open" id="tl-caret">&#9660;</span>
+  <!-- Gantt chart -->
+  <div class="gantt-section" id="gantt-section">
+    <div class="gantt-header" id="gantt-toggle">
+      <div class="gantt-header-left">
+        <span class="gantt-title">Timeline</span>
+        <div class="gantt-legend" id="gantt-legend"></div>
+      </div>
+      <span class="gantt-caret open" id="gantt-caret">&#9660;</span>
+    </div>
+    <div class="gantt-body" id="gantt-body">
+      <div class="gantt-wrap"><div class="gantt-canvas-area" id="gantt-canvas"></div></div>
+    </div>
   </div>
-  <div class="timeline" id="timeline"></div>
+
+  <div class="task-list" id="task-list"></div>
 </main>
 
 <script>
@@ -397,7 +405,7 @@ async function load(){
     });
     setLastSync();
     badge("live","live");
-    renderStats(); renderList(); renderTimeline();
+    renderStats(); renderList(); renderGantt();
   } catch(e){
     badge("error","offline");
   }
@@ -453,7 +461,7 @@ async function backgroundPoll(){
       }
     });
 
-    if(statsChanged) renderStats();
+    if(statsChanged){ renderStats(); renderGantt(); }
     setLastSync();
     badge("live","live");
   } catch(e){
@@ -590,115 +598,156 @@ function renderStats(){
   ).join("");
 }
 
-// ── Timeline ──
-function renderTimeline(){
-  const el = document.getElementById("timeline");
+// ── Gantt chart ──
+function renderGantt(){
+  const canvas = document.getElementById("gantt-canvas");
   const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+
+  function parseDeadline(str){
+    if(!str||!str.trim()) return null;
+    str = str.trim();
+    const mn = /^([A-Za-z]+)\s+(\d{1,2})(?:[,\s]+(\d{4}))?$/.exec(str);
+    if(mn){
+      const mi = MONTHS.findIndex(m=>mn[1].toLowerCase().startsWith(m.toLowerCase()));
+      if(mi>=0){ const yr=mn[3]?+mn[3]:new Date().getFullYear(); return new Date(yr,mi,+mn[2]); }
+    }
+    const sl = /^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?$/.exec(str);
+    if(sl){ const yr=sl[3]?(+sl[3]<100?2000+ +sl[3]:+sl[3]):new Date().getFullYear(); return new Date(yr,+sl[1]-1,+sl[2]); }
+    const d=new Date(str); return isNaN(d)?null:d;
+  }
+
   const today = new Date(); today.setHours(0,0,0,0);
 
-  // Parse deadline strings into dates — handles "Apr 15", "April 15", "4/15", "4/15/2026"
-  function parseDeadline(str){
-    if(!str || !str.trim()) return null;
-    str = str.trim();
-    // Try "Apr 15" or "April 15" style
-    const monthName = /^([A-Za-z]+)\s+(\d{1,2})(?:[,\s]+(\d{4}))?$/.exec(str);
-    if(monthName){
-      const mIdx = MONTHS.findIndex(m => monthName[1].toLowerCase().startsWith(m.toLowerCase()));
-      if(mIdx >= 0){
-        const yr = monthName[3] ? +monthName[3] : (new Date()).getFullYear();
-        return new Date(yr, mIdx, +monthName[2]);
-      }
-    }
-    // Try slash format
-    const slash = /^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?$/.exec(str);
-    if(slash){
-      const yr = slash[3] ? (+slash[3] < 100 ? 2000 + +slash[3] : +slash[3]) : (new Date()).getFullYear();
-      return new Date(yr, +slash[1]-1, +slash[2]);
-    }
-    // Try native parse as last resort
-    const d = new Date(str);
-    return isNaN(d) ? null : d;
+  // Figure out date range from all deadlines
+  const dates = TASKS.map(t=>parseDeadline(state[t.id].deadline)).filter(Boolean);
+  if(!dates.length){
+    canvas.innerHTML = `<div class="gantt-empty">add deadlines to tasks to see the timeline</div>`;
+    return;
   }
 
-  function daysDiff(d){ return Math.round((d - today) / 86400000); }
+  // Extend range: start = today or earliest, end = latest + small buffer
+  let minD = new Date(Math.min(today, ...dates));
+  let maxD = new Date(Math.max(...dates));
+  // Buffer: start 3 days before min, end 7 days after max
+  minD = new Date(minD.getTime() - 3*86400000);
+  maxD = new Date(maxD.getTime() + 7*86400000);
+  const totalMs = maxD - minD;
+  const totalDays = totalMs / 86400000;
 
-  function urgency(d, status){
-    if(status === "complete") return "done-item";
-    const diff = daysDiff(d);
-    if(diff < 0) return "overdue";
-    if(diff <= 5) return "soon";
-    return "ok";
+  function pct(d){ return Math.max(0, Math.min(100, (d - minD) / totalMs * 100)); }
+
+  // Build axis ticks (aim for ~6-8 ticks)
+  const tickCount = Math.min(8, Math.max(4, Math.floor(totalDays / 7)));
+  const tickInterval = Math.ceil(totalDays / tickCount);
+  const ticks = [];
+  for(let i=0;i<=tickCount;i++){
+    const d = new Date(minD.getTime() + i*tickInterval*86400000);
+    if(d > maxD) break;
+    ticks.push(d);
   }
 
-  // Build list: tasks with deadlines first (sorted), then without
-  const withDL = [], withoutDL = [];
-  TASKS.forEach(t => {
+  // Status colors for bars
+  const BAR_COLORS = {
+    "not started": {bg:"rgba(72,72,80,.5)",   text:"#8c8c96"},
+    "in progress":  {bg:"rgba(91,156,246,.35)", text:"#5b9cf6"},
+    "blocked":      {bg:"rgba(240,101,101,.4)", text:"#f06565"},
+    "in review":    {bg:"rgba(192,132,252,.35)",text:"#c084fc"},
+    "published":    {bg:"rgba(245,166,35,.35)", text:"#f5a623"},
+    "complete":     {bg:"rgba(62,207,142,.35)", text:"#3ecf8e"},
+  };
+
+  // Axis HTML
+  let axisHTML = `<div class="gantt-axis">`;
+  const firstPct = pct(ticks[0]);
+  ticks.forEach((d,i) => {
+    const p = pct(d);
+    const label = `${MONTHS[d.getMonth()]} ${d.getDate()}`;
+    axisHTML += `<div class="gantt-axis-tick" style="position:absolute;left:${p}%;transform:translateX(-50%)">${label}</div>`;
+  });
+  // Today marker
+  const todayPct = pct(today);
+  if(todayPct >= 0 && todayPct <= 100){
+    axisHTML += `<div class="gantt-today-line" style="left:${todayPct}%;height:calc(100% + 200px);top:-24px">
+      <div class="gantt-today-label">today</div>
+    </div>`;
+  }
+  axisHTML += `</div>`;
+
+  // Grid lines
+  let gridHTML = ``;
+  ticks.forEach(d => {
+    const p = pct(d);
+    gridHTML += `<div class="gantt-gridline" style="left:${p}%"></div>`;
+  });
+
+  // Rows — one per task, sorted by deadline (no-deadline last)
+  const sorted = [...TASKS].sort((a,b)=>{
+    const da = parseDeadline(state[a.id].deadline);
+    const db = parseDeadline(state[b.id].deadline);
+    if(!da && !db) return 0;
+    if(!da) return 1;
+    if(!db) return -1;
+    return da - db;
+  });
+
+  let rowsHTML = ``;
+  sorted.forEach(t => {
     const s = state[t.id];
-    const d = parseDeadline(s.deadline);
-    if(d) withDL.push({t, s, d});
-    else withoutDL.push({t, s});
-  });
-  withDL.sort((a,b) => a.d - b.d);
+    const dl = parseDeadline(s.deadline);
+    const col = BAR_COLORS[s.status] || BAR_COLORS["not started"];
+    const shortName = t.title.length > 18 ? t.title.slice(0,16)+"…" : t.title;
+    const assigneeStr = s.assignees.length ? s.assignees.map(a=>a.split(" ")[0]).join(", ") : "";
 
-  if(!withDL.length && !withoutDL.length){ el.innerHTML = `<div class="tl-empty">no tasks yet</div>`; return; }
+    let barHTML = ``;
+    if(dl){
+      // Bar: from today (or minD if in past) to deadline
+      const barStart = Math.min(today, dl);
+      const barStartPct = pct(barStart);
+      const barEndPct = pct(dl);
+      const barWidth = Math.max(0.5, barEndPct - barStartPct);
+      const daysLeft = Math.round((dl - today)/86400000);
+      const dlLabel = daysLeft < 0 ? `${Math.abs(daysLeft)}d ago` : daysLeft === 0 ? "today" : `${daysLeft}d left`;
 
-  const rows = [];
+      barHTML += `<div class="gantt-bar" style="left:${barStartPct}%;width:${barWidth}%;background:${col.bg};color:${col.text}" title="${t.title} — ${MONTHS[dl.getMonth()]} ${dl.getDate()}">
+        <span class="gantt-bar-label">${shortName}</span>
+      </div>`;
 
-  withDL.forEach(({t, s, d}) => {
-    const urg = urgency(d, s.status);
-    const diff = daysDiff(d);
-    let rel = "";
-    if(s.status === "complete") rel = "complete";
-    else if(diff < 0) rel = `${Math.abs(diff)}d overdue`;
-    else if(diff === 0) rel = "today";
-    else if(diff === 1) rel = "tomorrow";
-    else rel = `in ${diff}d`;
-    const m = SM[s.status];
-    const assigneeStr = s.assignees.length ? s.assignees.map(a=>a.split(" ")[0]).join(", ") : "unassigned";
-    rows.push(`<div class="tl-item tl-${urg} ${urg==="done-item"?"tl-done-item":""}">
-      <div class="tl-date-col">
-        <div class="tl-day">${d.getDate()}</div>
-        <div class="tl-month">${MONTHS[d.getMonth()]}</div>
-        <div class="tl-relative">${rel}</div>
-      </div>
-      <div class="tl-content">
-        <div class="tl-dot" style="background:${m.dot}"></div>
-        <div class="tl-info">
-          <div class="tl-title">${t.title}</div>
-          <div class="tl-assignees">${assigneeStr}</div>
-        </div>
-        <div class="tl-chips">
-          <span class="chip ${m.cls}">${m.label}</span>
-        </div>
-      </div>
-    </div>`);
-  });
+      // Deadline diamond
+      const dlPct = pct(dl);
+      const isOverdue = daysLeft < 0;
+      const isSoon = daysLeft >= 0 && daysLeft <= 5;
+      const dColor = isOverdue ? "var(--red)" : isSoon ? "var(--amber)" : col.text;
+      barHTML += `<div class="gantt-diamond" style="left:${dlPct}%;background:${dColor}" title="${MONTHS[dl.getMonth()]} ${dl.getDate()}">
+        <div class="gantt-diamond-tip">${dlLabel}</div>
+      </div>`;
+    } else {
+      // No deadline — dim placeholder
+      barHTML = `<div style="position:absolute;left:0;right:0;top:50%;height:1px;background:var(--b2);transform:translateY(-50%)"></div>`;
+    }
 
-  // Tasks without deadlines
-  withoutDL.forEach(({t, s}) => {
-    const m = SM[s.status];
-    const assigneeStr = s.assignees.length ? s.assignees.map(a=>a.split(" ")[0]).join(", ") : "unassigned";
-    rows.push(`<div class="tl-item tl-nodl" style="opacity:.5">
-      <div class="tl-date-col">
-        <div class="tl-day" style="font-size:14px;color:var(--t3)">—</div>
-        <div class="tl-month">no date</div>
-        <div class="tl-relative" style="color:var(--t3)">unscheduled</div>
+    rowsHTML += `<div class="gantt-row">
+      <div class="gantt-row-label" title="${t.title}${assigneeStr?" · "+assigneeStr:""}">${shortName}</div>
+      <div class="gantt-row-track" style="position:relative">
+        ${gridHTML}
+        ${barHTML}
       </div>
-      <div class="tl-content">
-        <div class="tl-dot" style="background:${m.dot}"></div>
-        <div class="tl-info">
-          <div class="tl-title">${t.title}</div>
-          <div class="tl-assignees">${assigneeStr}</div>
-        </div>
-        <div class="tl-chips">
-          <span class="chip ${m.cls}">${m.label}</span>
-        </div>
-      </div>
-    </div>`);
+    </div>`;
   });
 
-  el.innerHTML = rows.join("");
+  // Legend
+  const usedStatuses = [...new Set(TASKS.map(t=>state[t.id].status))];
+  const legendEl = document.getElementById("gantt-legend");
+  if(legendEl){
+    legendEl.innerHTML = usedStatuses.map(st => {
+      const col = BAR_COLORS[st]||BAR_COLORS["not started"];
+      const lbl = SM[st]?SM[st].label:st;
+      return `<div class="gantt-legend-item"><div class="gantt-legend-dot" style="background:${col.bg};border:1px solid ${col.text}"></div>${lbl}</div>`;
+    }).join("");
+  }
+
+  canvas.innerHTML = axisHTML + rowsHTML;
 }
+
 
 // ── Full list render — only called on first load ──
 function renderList(){
@@ -830,7 +879,7 @@ function attachHandlers(){
       if(ok){
         const msg = document.getElementById("sm-"+id);
         if(msg){ msg.style.opacity="1"; setTimeout(()=>{ msg.style.opacity="0"; },2000); }
-        renderStats(); renderTimeline();
+        renderStats(); renderGantt();
       }
     });
   });
@@ -845,12 +894,12 @@ document.querySelectorAll(".fbtn").forEach(b => {
   });
 });
 
-// ── Timeline toggle ──
-document.getElementById("tl-toggle").addEventListener("click", () => {
-  const el = document.getElementById("timeline");
-  const caret = document.getElementById("tl-caret");
-  const hidden = el.style.display === "none";
-  el.style.display = hidden ? "" : "none";
+// ── Gantt toggle ──
+document.getElementById("gantt-toggle").addEventListener("click", () => {
+  const body = document.getElementById("gantt-body");
+  const caret = document.getElementById("gantt-caret");
+  const hidden = body.style.display === "none";
+  body.style.display = hidden ? "" : "none";
   caret.classList.toggle("open", hidden);
 });
 
